@@ -1,6 +1,6 @@
 # Dotfiles Manager
 
-A powerful Bash wrapper for **GNU Stow** designed to manage both user (`$HOME`) and system (`/etc`) configuration files. It automates moving files into a central repository and manages the pointers (symlinks) back to the system.
+A Bash wrapper for **GNU Stow** designed to manage both user (`$HOME`) and system (`/etc`) configuration files. It automates moving files into a central repository and manages the pointers (symlinks) from system back to the main dotfiles repository.
 
 ## Features
 - **Adopt (`-a`)**: Moves a real file/folder into your dotfiles repo and replaces the original with a symlink.
@@ -21,7 +21,7 @@ A powerful Bash wrapper for **GNU Stow** designed to manage both user (`$HOME`) 
    mkdir -p ~/.dotfiles
    ```
 
-2. Place the `dotfiles` script into your local bin folder:
+2. Place the `dotfiles` script into your local bin folder and paste the contents from dotfiles.
    ```bash
    mkdir -p ~/.local/bin
    cp dotfiles ~/.local/bin/
@@ -47,7 +47,7 @@ Check which packages are properly linked from the system to your repo:
 dotfiles -l
 ```
 
-### 3. Sync/Install packages (The "Laptop" Command)
+### 3. Sync/Install packages on a different machine
 Ensures the system points to your dotfiles. If a real file exists where a link should be, it moves the file to `/tmp` and creates the link:
 ```bash
 dotfiles -sa
@@ -71,5 +71,5 @@ When you run `dotfiles -s`, the script:
 2. Moves those conflicting files to `/tmp/dotfiles_backup_[timestamp]` (it will tell you the exact path).
 3. Creates fresh symlinks in the system pointing back to your dotfiles repo.
 
-### Final Note for the script:
+### Final Tip
 Ensure your script file is named exactly `dotfiles` (no `.sh` extension) inside `~/.local/bin` so you can call it just by typing `dotfiles` in your terminal. I also have it under an alias `d` so it's super easy to type.
