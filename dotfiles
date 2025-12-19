@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+
+##################################################################
+# SCRIPT: dotfiles
+# PURPOSE: Manage configuration files using GNU Stow
+##################################################################
+
+# Use realpath to ensure paths are absolute and consistent
+stowroot=$(realpath -m "$HOME/.dotfiles")
+owner="${SUDO_USER:-$USER}"
+
+# Display help and usage information
+function show_help() {
+    echo "Usage: dotfiles [option] [arguments]"
+    echo ""
+    echo "Options:"
+    echo "  -l, --list                     List packages and their status (✅/❌)"
+    echo "  -a, --add <package> <path>     Adopt a file or folder into a package"
+    echo "  -r, --remove <packages...>     Restore files back to original locations"
+    echo "  -s, --sync <packages...|-a>    Sync packages from dotfiles to system"
+    echo "  -h, --help                     Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  dotfiles -l"
+    echo "  dotfiles -sa                   # Sync all packages"
+    exit 0
+}
+
+##################################################################
+# 1. LIST PACKAGES WITH STATUS (-l, --list)
+##################################################################
+function list_packages() {
+    if [[ ! -d "$stowroot" ]]; then
+        echo "❌ Error: Repository $stowroot does not exist."
+        exit 1
+    fi
+
+    local list_output
+    list_output=$(
+        for pkg_path in "$stowroot"/*/; do
+            [[ -e "$pkg_path" ]] || continue
+            pkgname=$(basename "$pkg_path")
+            [[ "$pkgname" == ".git" ]] && continue
+
+            # STRUCTURE GUARD: Determine the correct target for this specific package
+            local target="$HOME"
+            if ls -A "$pkg_path" | grep -E -q "^(etc|usr|var|opt|bin|boot|run|lib|lib64|sbin)$"; then
+                target="/"
+            fi
+
+            # Check status only against the correct target
+            # We grep specifically for the word "LINK" at the start of the line
+            local check
+            check=$(stow -d "$stowroot" -t "$target" -nv "$pkgname" 2>&1 | grep -v "^WARNING" | grep "^LINK")
+            
+            if [[ -n "$check" ]]; then
+                echo "$pkgname (❌)"
+            else
+                echo "$pkgname (✅)"
+            fi
+        done | sort
+    )
+
+    if [[ -n "$list_output" ]]; then
+        echo "$list_output"
+        local count
+        count=$(echo "$list_output" | wc -l)
+        echo "--------------------------------"
+        echo "Sum: $count packages."
+    else
+        echo "No packages found in $stowroot."
+    fi
+}
+
+##################################################################
+# 2. SYNC PACKAGES (-s, --sync)
+##################################################################
+function sync_packages() {
+    local pkgs=()
+    local all_mode=false
+    local backup_dir="/tmp/dotfiles_backup_$(date +%Y%m%d_%H%M%S)"
+    local backup_created=false
+
+    for arg in "$@"; do
+        if [[ "$arg" == "-a" || "$arg" == "--all" || "$arg" == "all" ]]; then
+            all_mode=true
+        else
+            pkgs+=("$arg")
+        fi
+    done
+
+    if [[ "$all_mode" == true ]]; then
+        mapfile -t pkgs < <(find "$stowroot" -maxdepth 1 -mindepth 1 -type d -not -name ".git" -printf "%f\n")
+    fi
+
+    [[ ${#pkgs[@]} -eq 0 ]] && { echo "❌ Error: No packages specified."; return 1; }
+
+    for pkg in "${pkgs[@]}"; do
+        local pkgdir="$stowroot/$pkg"
+        [[ ! -d "$pkgdir" ]] && { echo "⚠️  Skipping: '$pkg' not found."; continue; }
+
+        local target="$HOME"
+        if ls -A "$pkgdir" | grep -E -q "^(etc|usr|var|opt|bin|boot|run|lib|lib64|sbin)$"; then
+            target="/"
+        fi
+
+        echo ">>> Syncing: $pkg (Target: $target)"
+
+        local conflicts
+        conflicts=$(stow -d "$stowroot" -t "$target" -nv "$pkg" 2>&1 | grep -E "\* CONFLICT|neither a link nor a directory" | awk '{print $NF}')
+
+        if [[ -n "$conflicts" ]]; then
+            for item in $conflicts; do
+                local full_item_path="$target/$item"
+                if [[ -e "$full_item_path" && ! -L "$full_item_path" ]]; then
+                    [[ "$backup_created" == false ]] && { mkdir -p "$backup_dir"; backup_created=true; }
+                    echo "    📦 Backup: $item"
+                    sudo mkdir -p "$(dirname "$backup_dir/$item")"
+                    sudo mv "$full_item_path" "$backup_dir/$item"
+                fi
+            done
+        fi
+
+        if sudo stow -R --no-folding -v2 -d "$stowroot" -t "$target" "$pkg"; then
+            echo "    ✔ Done."
+        else
+            echo "    ❌ Failed: $pkg"
+        fi
+    done
+
+    [[ "$backup_created" == true ]] && echo -e "\n⚠️  Conflicts moved to: $backup_dir"
+}
+
+##################################################################
+# 3. ADOPT PACKAGE (-a, --add)
+##################################################################
+function adopt_package() {
+    pkg="$1"
+    src=$(realpath -e -- "$2" 2>/dev/null)
+    [[ -z "$src" ]] && { echo "❌ Error: Path '$2' does not exist."; exit 1; }
+
+    src="${src%/}"
+    stowpkg="$stowroot/$pkg"
+
+    [[ "$src" == "$HOME"* ]] && { target="$HOME"; relsrc="${src#$HOME/}"; } || { target="/"; relsrc="${src#/}"; }
+
+    dst="$stowpkg/$relsrc"
+    echo -e "\n>>> Adopting '$src' into '$pkg':"
+    sudo mkdir -p "$(dirname "$dst")"
+    sudo cp -a "$src" "$dst" && echo "    ✔ Copied." || { echo "❌ Copy failed."; exit 1; }
+
+    sudo chown -R "$owner":"$owner" "$stowpkg"
+    sudo chmod -R u+rwX,go+rX "$stowpkg"
+    sudo rm -rf "$src"
+
+    sudo stow -v2 -d "$stowroot" -t "$target" "$pkg" && echo "✔ Adopted." || echo "❌ Stow failed."
+}
+
+##################################################################
+# 4. RESTORE PACKAGES (-r, --remove)
+##################################################################
+function remove_packages() {
+    for pkg in "$@"; do
+        pkgdir="$stowroot/$pkg"
+        [[ ! -d "$pkgdir" ]] && continue
+
+        echo -e "\n>>> Restoring: $pkg"
+        mapfile -t files < <(find "$pkgdir" -mindepth 1 -not -type d | sort)
+
+        for path in "${files[@]}"; do
+            rel="${path#$pkgdir/}"
+            if [[ -L "$HOME/$rel" ]] && [[ "$(readlink -f "$HOME/$rel")" == "$path" ]]; then dest="$HOME/$rel"
+            elif [[ -L "/$rel" ]] && [[ "$(readlink -f "/$rel")" == "$path" ]]; then dest="/$rel"
+            else
+                head="${rel%%/*}"
+                case "$head" in
+                    etc|usr|var|opt|bin|sbin|lib|lib64|boot|run) dest="/$rel" ;;
+                    *) dest="$HOME/$rel" ;;
+                esac
+            fi
+
+            echo "    Restoring: $dest"
+            sudo mkdir -p "$(dirname "$dest")"
+            [[ -L "$dest" ]] && sudo rm "$dest"
+            sudo mv "$path" "$dest"
+            [[ "$dest" == /etc* || "$dest" == /usr* ]] && sudo chown root:root "$dest" || sudo chown "$USER":"$USER" "$dest"
+        done
+
+        sudo find "$pkgdir" -type d -empty -not -path "$pkgdir" -delete
+        [[ -d "$pkgdir" ]] && sudo rmdir "$pkgdir" 2>/dev/null
+    done
+}
+
+##################################################################
+# MAIN
+##################################################################
+if [[ "$1" =~ ^-s.*a$ ]]; then
+    sync_packages "all"
+    exit 0
+fi
+
+case "$1" in
+    -l|--list)   list_packages ;;
+    -a|--add)    [[ -z "$2" || -z "$3" ]] && show_help; adopt_package "$2" "$3" ;;
+    -r|--remove) [[ -z "$2" ]] && show_help; remove_packages "${@:2}" ;;
+    -s|--sync)   [[ -z "$2" ]] && show_help; sync_packages "${@:2}" ;;
+    -h|--help|*) show_help ;;
+esac
